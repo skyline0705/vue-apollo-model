@@ -12,7 +12,8 @@
         "build": "rollup -c",
         "watch": "rollup -c -w",
         "docs:dev": "vuepress dev docs",
-        "docs:build": "vuepress build docs"
+        "docs:build": "vuepress build docs",
+        "test": "jest"
     },
     "files": [
         "dist",
@@ -20,14 +21,17 @@
         "readme.md"
     ],
     "devDependencies": {
+        "@types/jest": "^26.0.23",
         "@vue/composition-api": "^1.0.0-rc.6",
         "apollo-client": "^2.6.4",
         "eslint": "^7.23.0",
+        "jest": "^27.0.5",
         "reflect-metadata": "^0.1.13",
         "rollup": "^2.44.0",
         "rollup-plugin-commonjs": "^10.1.0",
         "rollup-plugin-node-resolve": "^5.2.0",
         "rollup-plugin-typescript2": "^0.30.0",
+        "ts-jest": "^27.0.3",
         "typescript": "^4.2.3",
         "vue": "^2.6.12",
         "vue-router": "^3.5.1",
