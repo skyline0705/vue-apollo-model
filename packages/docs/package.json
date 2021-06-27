@@ -1,0 +1,23 @@
+{
+    "name": "@reborn/docs",
+    "version": "0.1.0",
+    "main": "dist/index.js",
+    "module": "dist/index.es.js",
+    "typings": "dist/module.d.ts",
+    "sideEffects": [
+        "reflect-metadata"
+    ],
+    "license": "MIT",
+    "scripts": {
+        "build": "vuepress build docs",
+        "dev": "vuepress dev docs"
+    },
+    "files": [
+        "dist",
+        "src",
+        "readme.md"
+    ],
+    "devDependencies": {
+        "vuepress": "^1.8.2"
+    }
+}
