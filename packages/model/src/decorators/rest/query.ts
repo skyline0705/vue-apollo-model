@@ -10,177 +10,161 @@ import { RestQueryOptions, VariablesFn, RestClient, RestFetchMoreOptions } from 
 import { BaseModel } from '../../model';
 import xstream, { Subscription } from 'xstream';
 import { initDataType } from '../utils';
+import { computed, watch, nextTick, UnwrapRef } from '@vue/composition-api';
 
-export class RestQuery<ModelType extends BaseModel, DataType> {
-    observable = xstream.create<{loading: boolean, data: DataType}>();
-
-    private option: RestQueryOptions<ModelType>;
-    private listeners: Array<() => void> = [];
-    private client: RestClient<DataType>;
-    private model: ModelType;
-    private vm: Vue;
-
-    loading: boolean = false;
-    data?: DataType;
-    error: any;
-
-    constructor(
-        option: RestQueryOptions<ModelType>,
-        model: ModelType,
-        vm: Vue,
-        client: RestClient<DataType>,
-    ) {
-        this.option = option;
-        this.model = model;
-        this.client = client;
-        this.vm = vm;
-        initDataType(this);
-    }
-
-    private get skip() {
-        if (typeof this.option.skip === 'function') {
-            return this.option.skip.call(this.model, this.vm.$route);
+export function createRestQuery<ModelType extends BaseModel, DataType>(
+    option: RestQueryOptions<ModelType>,
+    model: ModelType,
+    vm: Vue,
+    client: RestClient<UnwrapRef<DataType>>,
+) {
+    const info = initDataType<DataType>();
+    const skip = computed(() => {
+        if (typeof option.skip === 'function') {
+            return option.skip.call(model, vm.$route);
         }
-        return this.option.skip;
-    }
+        return !!option.skip;
+    });
 
-    private get pollInterval() {
-        if (typeof this.option.pollInterval === 'function') {
-            return this.option.pollInterval.call(this.model, this.vm.$route);
+    const pollInterval = computed(() => {
+        if (typeof option.pollInterval === 'function') {
+            return option.pollInterval.call(model, vm.$route);
         }
-        return this.option.pollInterval;
-    }
+        return option.pollInterval || 0;
+    });
 
-    private get variables() {
-        if (typeof this.option.variables === 'function') {
-            return (this.option.variables as VariablesFn<ModelType>).call(this.model, this.vm.$route);
+    const variables = computed(() => {
+        if (typeof option.variables === 'function') {
+            return (option.variables as VariablesFn<ModelType>).call(model, vm.$route);
         }
-        return this.option.variables;
-    }
-    private get url() {
-        if (typeof this.option.url === 'function') {
-            return this.option.url.call(
-                this.model,
-                this.vm.$route,
-                this.variables,
-            );
+        return option.variables;
+    });
+
+    const url = computed(() => {
+        if (typeof option.url === 'function') {
+            return option.url.call(model, vm.$route, variables);
         }
-        return this.option.url;
-    }
-    prefetch() {
-        // TODO
-    }
+        return option.url;
+    });
 
-    init() {
-        const watcher = this.vm.$watch(() => [
-            this.variables,
-            this.skip,
-            this.url,
-        ], (newV, oldV) => {
-            // TODO短时间内大概率会触发两次判断，具体原因未知= =
-            if (newV.some((v, index) => JSON.stringify(oldV[index]) !== JSON.stringify(v))) {
-                this.changeVariables();
-            }
-        });
+    const variablesComputed = computed(() => [variables.value, skip.value, url.value]);
 
-        // TODO临时解，后面再优化
-        const intervalWatcher = this.vm.$watch(() => this.pollInterval, (newV, oldV) => {
-            // TODO短时间内大概率会触发两次判断，具体原因未知= =
-            if (newV !== oldV) {
-                this.changePollInterval();
-            }
-        });
+    let pollIntervalSub: Subscription | null = null;
 
-        this.listeners.push(intervalWatcher);
-        this.listeners.push(watcher);
-        if (!this.skip) {
-            this.refetch();
-            this.changePollInterval();
-        }
-    }
-
-    private pollIntervalSub: null | Subscription = null;
-
-    private changePollInterval = () => {
-        this.vm.$nextTick(() => {
-            if (this.pollIntervalSub) {
-                this.pollIntervalSub.unsubscribe();
-                this.pollIntervalSub = null;
-            }
-            if (!this.pollInterval) {
+    function changeVariables() {
+        nextTick(() => {
+            if (skip.value) {
                 return;
             }
-            this.pollIntervalSub = xstream
-                .periodic(this.pollInterval)
+            if (pollIntervalSub) {
+                // 参数改变等待下次interval触发
+                return;
+            }
+            refetch();
+        });
+    }
+
+    const variablesWatcher = watch(() => variablesComputed.value, (newV, oldV) => {
+        // TODO短时间内大概率会触发两次判断，具体原因未知= =
+        if (newV.some((v, index) => oldV[index] !== v)) {
+            changeVariables();
+        }
+    });
+
+    function refetch() {
+        info.loading = true;
+        // TODO差缓存数据做SSR还原
+        return new Promise(resolve => {
+            client({
+                url: url.value,
+                headers: option.headers,
+                credentials: option.credentials,
+                method: option.method,
+                data: variables.value,
+            }).then(data => {
+                info.error = null;
+                if (data) {
+                    info.data = data;
+                }
+                info.loading = false;
+                resolve(undefined);
+            }).catch(e => {
+                info.error = e;
+                info.loading = false;
+                resolve(undefined);
+            });
+        });
+    }
+
+    function changePollInterval() {
+        nextTick(() => {
+            if (pollIntervalSub) {
+                pollIntervalSub.unsubscribe();
+                pollIntervalSub = null;
+            }
+            if (!pollInterval) {
+                return;
+            }
+            pollIntervalSub = xstream
+                .periodic(pollInterval.value)
                 .subscribe({
-                    next: () => this.refetch(),
+                    next: () => refetch(),
                 });
         });
     }
 
-    private changeVariables = () => {
-        this.vm.$nextTick(() => {
-            if (this.skip) {
-                return;
-            }
-            if (this.pollIntervalSub) {
-                // 参数改变等待下次interval触发
-                return;
-            }
-            this.refetch();
-        });
+    const intervalWatcher = watch(() => pollInterval.value, (newV, oldV) => {
+        // TODO短时间内大概率会触发两次判断，具体原因未知= =
+        if (newV !== oldV) {
+            changePollInterval();
+        }
+    });
+
+    function init() {
+        if (!skip.value) {
+            refetch();
+            changePollInterval();
+        }
     }
 
-    destroy() {
-        this.listeners.forEach(unwatch => unwatch());
-        this.listeners = [];
-        this.pollIntervalSub?.unsubscribe();
-        this.pollIntervalSub = null;
+    function destroy() {
+        intervalWatcher();
+        variablesWatcher();
+        pollIntervalSub?.unsubscribe();
+        pollIntervalSub = null;
     }
 
-    fetchMore({ variables, updateQuery } : RestFetchMoreOptions<DataType>) {
+    function fetchMore({ variables, updateQuery } : RestFetchMoreOptions<UnwrapRef<DataType>>) {
         return new Promise(resolve => {
-            this.loading = true;
-            this.client({
-                url: this.url,
-                headers: this.option.headers,
-                method: this.option.method,
+            info.loading = true;
+            client({
+                url: url.value,
+                headers: option.headers,
+                method: option.method,
                 data: variables,
             }).then(data => {
-                this.error = null;
-                this.data = data ? updateQuery(this.data, data) : this.data;
-                this.loading = false;
+                info.error = null;
+                info.data = data ? updateQuery(data, data) : data;
+                info.loading = false;
                 resolve(undefined);
             }).catch(e => {
-                this.error = e;
-                this.loading = false;
+                info.error = e;
+                info.loading = false;
                 resolve(undefined);
             });
         });
     }
 
-    refetch() {
-        this.loading = true;
-        // TODO差缓存数据做SSR还原
-        return new Promise(resolve => {
-            this.client({
-                url: this.url,
-                headers: this.option.headers,
-                credentials: this.option.credentials,
-                method: this.option.method,
-                data: this.variables,
-            }).then(data => {
-                this.error = null;
-                if (data) {
-                    this.data = data;
-                }
-                this.loading = false;
-                resolve(undefined);
-            }).catch(e => {
-                this.error = e;
-                this.loading = false;
-                resolve(undefined);
-            });
-        });
+    function prefetch() {
+        // TODO
     }
+
+    return {
+        info,
+        init,
+        refetch,
+        fetchMore,
+        destroy,
+        prefetch,
+    };
 }

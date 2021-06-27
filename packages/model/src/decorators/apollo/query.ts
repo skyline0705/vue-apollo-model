@@ -11,40 +11,80 @@ import { ApolloQueryOptions, VariablesFn, ApolloFetchMoreOptions } from '../../t
 import { BaseModel } from '../../model';
 import xstream, { Stream } from 'xstream';
 import { initDataType } from '../utils';
-export class ApolloQuery<ModelType extends BaseModel, DataType> {
-    observer!: ObservableQuery<DataType>;
-    observable: Stream<{loading: boolean, data: DataType}> = xstream.create();
+import { computed, UnwrapRef, watch, nextTick } from '@vue/composition-api';
 
-    private option: ApolloQueryOptions<ModelType>;
-    private client: ApolloClient<any>;
-    private listeners: Array<() => void> = [];
-    private model: ModelType;
-    private vm: Vue;
-    private hasPrefetched = false;
+export function createApolloQuery<ModelType extends BaseModel, DataType>(
+    option: ApolloQueryOptions<ModelType>,
+    model: ModelType,
+    vm: Vue,
+    client: ApolloClient<any>,
+) {
+    const info = initDataType<DataType>();
 
-    loading: boolean = false;
-    data?: DataType;
-    error: any;
+    let hasPrefetched = false;
 
-    constructor(
-        option: ApolloQueryOptions<ModelType>,
-        model: ModelType,
-        vm: Vue,
-        client: ApolloClient<any>,
-    ) {
-        this.option = option;
-        this.client = client;
-        this.model = model;
-        this.vm = vm;
+    const pollInterval = computed(() => {
+        if (typeof option.pollInterval === 'function') {
+            return option.pollInterval.call(model, vm.$route);
+        }
+        return option.pollInterval;
+    });
 
-        initDataType(this);
+    const skip = computed(() => {
+        if (typeof option.skip === 'function') {
+            return option.skip.call(model, vm.$route);
+        }
+        return option.skip;
+    });
+
+    const variables = computed(() => {
+        if (option.variables && typeof option.variables === 'function') {
+            return (option.variables as VariablesFn<ModelType>).call(model, vm.$route);
+        }
+        return option.variables;
+    });
+
+
+    const queryOptions = computed(() => {
+        return {
+            ...option,
+            variables: variables.value,
+            skip: skip.value,
+            pollInterval: pollInterval.value,
+        };
+    });
+
+    function prefetch() {
+        const canPrefetch = typeof option.prefetch === 'function'
+            ? option.prefetch.call(model, vm.$route)
+            : option.prefetch;
+
+        if (!canPrefetch || hasPrefetched) {
+            return;
+        }
+        info.loading = true;
+        return client.query<UnwrapRef<DataType>>({
+            ...queryOptions.value,
+            fetchPolicy: queryOptions.value.fetchPolicy === 'cache-and-network'
+                ? 'cache-first'
+                : queryOptions.value.fetchPolicy
+        }).then(({ data }) => {
+            info.loading = false;
+            hasPrefetched = true;
+            info.data = data;
+            return data;
+        }).catch(err => {
+            info.loading = false;
+            info.error = err;
+        });
     }
 
-    // TODO后面应该要把fetchMore，refetch什么的都干掉才行……否则这块就是乱的= =
-    // 这里干的事情其实跟ObservableQuery干的事情有非常大的重合度……
-    private currentResult() {
-        if (this.observer) {
-            return this.observer.currentResult();
+    let observer: ObservableQuery<UnwrapRef<DataType>> | null = null;
+    const observable: Stream<{loading: boolean, data: UnwrapRef<DataType>}> = xstream.create();
+
+    function currentResult() {
+        if (observer) {
+            return observer.currentResult();
         }
         return {
             loading: true,
@@ -52,155 +92,103 @@ export class ApolloQuery<ModelType extends BaseModel, DataType> {
         };
     }
 
-    prefetch() {
-        const canPrefetch = typeof this.option.prefetch === 'function'
-            ? this.option.prefetch.call(this.model, this.vm.$route)
-            : this.option.prefetch;
-
-        if (!canPrefetch || this.hasPrefetched) {
-            return;
-        }
-        this.loading = true;
-        return this.client.query<DataType>({
-            ...this.queryOptions,
-            fetchPolicy: this.queryOptions.fetchPolicy === 'cache-and-network'
-                ? 'cache-first'
-                : this.queryOptions.fetchPolicy
-        }).then(({ data }) => {
-            this.loading = false;
-            this.hasPrefetched = true;
-            this.data = data;
-            return data;
-        }).catch(err => {
-            this.loading = false;
-            this.error = err;
-        });
-    }
-
-    private initObserver() {
-        this.observer = this.client.watchQuery(this.queryOptions);
+    function initObserver() {
+        observer = client.watchQuery(queryOptions.value);
         // 需要初始化watchQuery以后，currentResult才能拿到结果
-        const initialData = this.currentResult();
+        const initialData = currentResult();
         if (!initialData.loading) {
-            this.data = initialData.data as DataType;
+            info.data = initialData.data as UnwrapRef<DataType>;
         }
-        this.loading = true;
-        this.observer.subscribe({
+        info.loading = true;
+        observer.subscribe({
             next: ({data, loading}) => {
-                this.error = null;
+                info.error = null;
                 if (data) {
-                    this.data = data;
+                    info.data = data;
                 }
-                this.loading = loading;
-                this.observable.shamefullySendNext({data, loading});
+                info.loading = loading;
+                observable.shamefullySendNext({data, loading});
             },
             error: err => {
-                this.loading = false;
-                this.error = err;
-                this.observable.shamefullySendError(err);
+                info.loading = false;
+                info.error = err;
+                observable.shamefullySendError(err);
             },
             complete: () => {
-                this.error = null;
-                this.loading = false;
-                this.observable.shamefullySendComplete();
+                info.error = null;
+                info.loading = false;
+                observable.shamefullySendComplete();
             },
         });
     }
 
-    init() {
-        if (!this.skip) {
-            this.initObserver();
-        }
+    const optionsComputed = computed(() => [
+        variables.value,
+        skip.value,
+        pollInterval.value,
+    ]);
 
-        const watcher = this.vm.$watch(() => [
-            this.variables,
-            this.skip,
-            this.pollInterval,
-        ], (newV, oldV) => {
-            // TODO短时间内大概率会触发两次判断，具体原因未知= =
-            if (newV.some((v, index) => JSON.stringify(oldV[index]) !== JSON.stringify(v))) {
-                this.changeOptions();
-            }
-        });
-        this.listeners.push(watcher);
-    }
-
-    private get pollInterval() {
-        if (typeof this.option.pollInterval === 'function') {
-            return this.option.pollInterval.call(this.model, this.vm.$route);
+    const optionsWatcher = watch(() => optionsComputed.value, (newV, oldV) => {
+        // TODO短时间内大概率会触发两次判断，具体原因未知= =
+        if (newV.some((v, index) => oldV[index] !== v)) {
+            changeOptions();
         }
-        return this.option.pollInterval;
-    }
+    });
 
-    private get skip() {
-        if (typeof this.option.skip === 'function') {
-            return this.option.skip.call(this.model, this.vm.$route);
-        }
-        return this.option.skip;
-    }
-    private get variables() {
-        if (this.option.variables && typeof this.option.variables === 'function') {
-            return (this.option.variables as VariablesFn<ModelType>).call(this.model, this.vm.$route);
-        }
-        return this.option.variables;
-    }
-    private get queryOptions() {
-        return {
-            ...this.option,
-            variables: this.variables,
-            skip: this.skip,
-            pollInterval: this.pollInterval,
-        };
-    }
-
-    private changeOptions = () => {
-        this.vm.$nextTick(() => {
-            if (this.skip) {
+    function changeOptions() {
+        nextTick(() => {
+            if (skip.value) {
                 return;
             }
-            if (!this.observer) {
-                this.initObserver();
+            if (!observer) {
+                initObserver();
             } else {
-                this.observer.setOptions({
-                    ...this.queryOptions,
+                observer.setOptions({
+                    ...queryOptions.value,
                 }).then(result => {
                     // TODO太二了……缓存是不会走到Observable里的，所以需要手动处理
                     if (!result || !result.data) {
                         return;
                     }
 
-                    this.data = result.data as DataType;
-                    this.loading = result.loading;
-                    this.observable.shamefullySendNext(result as {
-                        loading: boolean;
-                        data: DataType;
-                    });
+                    info.data = result.data;
+                    info.loading = result.loading;
+                    observable.shamefullySendNext(result);
                 });
             }
         });
     }
 
-    destroy() {
-        this.listeners.forEach(unwatch => unwatch());
-        this.listeners = [];
+    function init() {
+        if (!skip.value) {
+            initObserver();
+        }
     }
 
-    fetchMore({ variables, updateQuery } : ApolloFetchMoreOptions<DataType>) {
-        if (!this.observer) {
+    function destroy() {
+        optionsWatcher();
+    }
+
+    function fetchMore({ variables, updateQuery } : ApolloFetchMoreOptions<UnwrapRef<DataType>>) {
+        if (!observer) {
             return;
         }
-        this.loading = true;
-        return this.observer.fetchMore({
+        info.loading = true;
+        return observer.fetchMore({
             variables,
             updateQuery: (prev, { fetchMoreResult } ) => {
                 if (!fetchMoreResult) {
                     return prev;
                 }
+
+                const data = updateQuery(prev, fetchMoreResult);
                 return {
                     // TODO等后面特么的把apollo-client干掉，这里就不需要了
                     // @ts-ignore
                     __typename: prev.__typename,
-                    ...updateQuery(prev, fetchMoreResult),
+                    // TODO等后面特么的把apollo-client干掉，这里就不需要了
+                    // @ts-ignore
+                    ...data,
                 };
             },
         });
@@ -208,11 +196,20 @@ export class ApolloQuery<ModelType extends BaseModel, DataType> {
 
     // refetch 只会手动调用
     // refetch 调用的时候不需要管！
-    refetch() {
-        if (!this.observer) {
+    function refetch() {
+        if (!observer) {
             return;
         }
-        this.loading = true;
-        return this.observer.refetch(this.variables);
+        info.loading = true;
+        return observer.refetch(variables.value);
     }
+
+    return {
+        info,
+        prefetch,
+        init,
+        destroy,
+        fetchMore,
+        refetch,
+    };
 }

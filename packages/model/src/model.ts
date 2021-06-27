@@ -3,10 +3,10 @@ import xstream, { Subscription } from 'xstream';
 
 import Store from './store';
 import {
-    ApolloQuery,
-    ApolloMutation,
-    RestQuery,
-    RestMutation,
+    createRestQuery,
+    createRestMutation,
+    createApolloQuery,
+    createApolloMutation
 } from './decorators/index';
 import {
     StreamsObj,
@@ -63,7 +63,7 @@ export class BaseModel {
         get?: Function;
         set?: Function;
     }> = [];
-    private $$apolloQueries: Array<ApolloQuery<any, any> | RestQuery<any, any>> = [];
+    private $$apolloQueries: Array<ReturnType<typeof createRestQuery | typeof createApolloQuery>> = [];
     // TODO临时放出来
     $clients!: GraphqlClients;
     hasSubscribed = false;
@@ -227,16 +227,16 @@ export class BaseModel {
             throw new Error('Before use an restQuery / restMutation, you must init "gqlClients" first');
         }
         if (options.type.endsWith('Mutation')) {
-            let mutation: ApolloMutation<T, any> | RestMutation<T, any>;
+            let mutation: ReturnType<typeof createRestMutation | typeof createApolloMutation>;
             if (options.type === 'apolloMutation') {
-                mutation = new ApolloMutation<T, any>(
+                mutation = createApolloMutation<T, any>(
                     options.detail,
                     this as unknown as T,
                     this.$vm,
                     getClient(this.$store.gqlClients!, options.detail.client),
                 );
             } else if (options.type === 'restMutation') {
-                mutation = new RestMutation<T, any>(
+                mutation = createRestMutation<T, any>(
                     options.detail,
                     this as unknown as T,
                     this.$vm,
@@ -245,30 +245,30 @@ export class BaseModel {
             }
             const value = {
                 get data() {
-                    return mutation.data;
+                    return mutation.info.data;
                 },
                 get loading() {
-                    return mutation.loading;
+                    return mutation.info.loading;
                 },
                 get mutate() {
                     return mutation.mutate.bind(mutation);
                 },
                 get error() {
-                    return mutation.error;
+                    return mutation.info.error;
                 },
             };
             registerProperty(this, key, value);
         } else {
-            let query!: ApolloQuery<T, any> | RestQuery<T, any>;
+            let query!: ReturnType<typeof createApolloQuery | typeof createRestQuery>;
             if (options.type === 'apolloQuery') {
-                query = new ApolloQuery<T, any>(
+                query = createApolloQuery<T, any>(
                     options.detail,
                     this as unknown as T,
                     this.$vm,
                     getClient(this.$store.gqlClients!, options.detail.client),
                 );
             } else if (options.type === 'restQuery') {
-                query = new RestQuery<T, any>(
+                query = createRestQuery<T, any>(
                     options.detail,
                     this as unknown as T,
                     this.$vm,
@@ -277,10 +277,10 @@ export class BaseModel {
             }
             const value = {
                 get data() {
-                    return query.data;
+                    return query.info.data;
                 },
                 get loading() {
-                    return query.loading;
+                    return query.info.loading;
                 },
                 get refetch() {
                     return query.refetch.bind(query);
@@ -289,12 +289,10 @@ export class BaseModel {
                     return query.fetchMore.bind(query);
                 },
                 get error() {
-                    return query.error;
+                    return query.info.error;
                 },
             };
             this.$$apolloQueries.push(query);
-            // TODO后面再改
-            this.$streamsFromApollo[key + '$'] = query.observable;
             registerProperty(this, key, value);
         }
     }

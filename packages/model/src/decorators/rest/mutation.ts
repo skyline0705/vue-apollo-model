@@ -9,68 +9,60 @@ import Vue from 'vue';
 import { RestMutationOptions, MutationVariablesFn, RestClient } from '../../types';
 import { BaseModel } from '../../model';
 import { initDataType } from '../utils';
+import { UnwrapRef } from '@vue/composition-api';
 
-export class RestMutation<ModelType extends BaseModel, DataType> {
-    private option: RestMutationOptions<ModelType>;
-    private client: RestClient<DataType>;
-    private model: ModelType;
-    private vm: Vue;
-
-    loading: boolean = false;
-    data?: DataType;
-    error: any;
-
-    constructor(
-        option: RestMutationOptions<ModelType>,
-        model: ModelType,
-        vm: Vue,
-        request: RestClient<DataType>,
-    ) {
-        this.option = option;
-        this.model = model;
-        this.client = request;
-        this.vm = vm;
-        initDataType(this);
-    }
-
-    private variables<T>(params: T) {
-        if (this.option.variables && typeof this.option.variables === 'function') {
-            return (this.option.variables as MutationVariablesFn<ModelType>).call(
-                this.model,
+export function createRestMutation<ModelType extends BaseModel, DataType>(
+    option: RestMutationOptions<ModelType>,
+    model: ModelType,
+    vm: Vue,
+    client: RestClient<UnwrapRef<DataType>>,
+){
+    const info = initDataType<DataType>();
+    function variables<T>(params: T) {
+        if (option.variables && typeof option.variables === 'function') {
+            return (option.variables as MutationVariablesFn<ModelType>).call(
+                model,
                 params,
-                this.vm.$route,
+                vm.$route,
             );
         }
         return params;
     }
-    private url<T>(params: T) {
-        if (this.option.url && typeof this.option.url === 'function') {
-            return this.option.url.call(
-                this.model,
-                this.vm.$route,
+
+    function url<T>(params: T) {
+        if (option.url && typeof option.url === 'function') {
+            return option.url.call(
+                model,
+                vm.$route,
                 params,
             );
         }
-        return this.option.url;
+        return option.url;
     }
-    mutate<T>(params: T) {
-        this.loading = true;
-        this.error = null;
-        return this.client({
-            url: this.url(this.variables(params)),
-            headers: this.option.headers,
-            credentials: this.option.credentials,
-            method: this.option.method,
-            data: this.variables(params),
+
+    function mutate<T>(params: T) {
+        info.loading = true;
+        info.error = null;
+        return client({
+            url: url(variables(params)),
+            headers: option.headers,
+            credentials: option.credentials,
+            method: option.method,
+            data: variables(params),
         }).then(data => {
-            this.error = null;
+            info.error = null;
             if (data) {
-                this.data = data;
+                info.data = data;
             }
-            this.loading = false;
+            info.loading = false;
         }).catch(e => {
-            this.error = e;
-            this.loading = false;
+            info.error = e;
+            info.loading = false;
         });
     }
+
+    return {
+        info,
+        mutate,
+    };
 }

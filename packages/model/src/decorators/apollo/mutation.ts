@@ -3,50 +3,43 @@ import { BaseModel } from '../../model';
 import Vue from 'vue';
 import { ApolloClient } from 'apollo-client';
 import { initDataType } from '../utils';
+import { UnwrapRef } from '@vue/composition-api';
 
-export class ApolloMutation<P extends BaseModel, T> {
-    private option: ApolloMutationOptions<P>;
-    private model: P;
-    private vm: Vue;
-    private client: ApolloClient<any>
-    data?: T;
-    loading = false;
-    error: any;
-
-    constructor(
-        option: ApolloMutationOptions<P>,
-        model: P,
-        vm: Vue,
-        client: ApolloClient<any>,
-    ) {
-        this.option = option;
-        this.client = client;
-        this.model = model;
-        this.vm = vm;
-        initDataType(this);
-    }
-    private variables<T>(params: T) {
-        if (this.option.variables && typeof this.option.variables === 'function') {
-            return (this.option.variables as MutationVariablesFn<P>).call(
-                this.model,
+export function createApolloMutation<Model extends BaseModel, DataType>(
+    option: ApolloMutationOptions<Model>,
+    model: Model,
+    vm: Vue,
+    client: ApolloClient<any>
+) {
+    const info = initDataType<DataType>();
+    function variables(params: DataType) {
+        if (option.variables && typeof option.variables === 'function') {
+            return (option.variables as MutationVariablesFn<Model>).call(
+                model,
                 params,
-                this.vm.$route,
+                vm.$route,
             );
         }
         return params;
     }
-    mutate(params: any) {
-        this.loading = true;
-        this.error = null;
-        return this.client.mutate<T>({
-            mutation: this.option.mutation,
-            variables: this.variables(params),
-        }).then(({ data }) => {
-            if (data) {
-                this.data = data;
-            }
-        }).catch(e => {
-            this.error = e
-        }).finally(() => this.loading = false);
-    }
+
+    return {
+        info,
+        mutate(params: any) {
+            info.loading = true;
+            info.error = null;
+            return client.mutate<UnwrapRef<DataType>>({
+                mutation: option.mutation,
+                variables: variables(params),
+            }).then(({ data }) => {
+                if (data) {
+                    info.data = data;
+                }
+            }).catch(e => {
+                info.error = e
+            }).finally(() => {
+                info.loading = false
+            });
+        }
+    };
 }
